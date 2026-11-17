@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lua Editor</title>
+<style>
+    * { box-sizing: border-box; }
+
+    html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #090909;
+    }
+
+    body {
+        display: flex;
+        flex-direction: column;
+        background: #090909;
+        color: #e6e6e6;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        font-size: 13px;
+    }
+
+    /* ---------------- Tab bar ---------------- */
+    #tabbar {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: stretch;
+        height: 38px;
+        background: #0d0d0d;
+        border-bottom: 1px solid #232323;
+        padding: 0 6px;
+        gap: 4px;
+        overflow: hidden;
+        user-select: none;
+    }
+
+    #tabs {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        align-items: stretch;
+        gap: 4px;
+        padding: 4px 0;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
+    }
+    #tabs::-webkit-scrollbar { height: 0; display: none; }
+
+    .tab {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 92px;
+        max-width: 200px;
+        padding: 0 8px 0 12px;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        background: transparent;
+        color: #8a8a8a;
+        font-size: 12.5px;
+        white-space: nowrap;
+        cursor: pointer;
+        transition: background .15s ease, color .15s ease, border-color .15s ease;
+    }
+
+    .tab:hover {
+        background: #161616;
+        color: #c8c8c8;
+    }
+
+    .tab.active {
+        background: #141414;
+        border-color: #2a2a2a;
+        color: #ffffff;
+    }
+
+    .tab-name {
+        flex: 1 1 auto;
+        min-width: 0;
+        padding: 8px 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .tab-rename {
+        flex: 1 1 auto;
+        min-width: 0;
+        width: 100%;
+        margin: 4px 0;
+        padding: 2px 4px;
+        background: #0a0a0a;
+        border: 1px solid #3a3a3a;
+        border-radius: 3px;
+        color: #ffffff;
+        font: inherit;
+        font-size: 12.5px;
+        outline: none;
+    }
+
+    .tab-close {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        padding: 0;
+        border: none;
+        border-radius: 4px;
+        background: transparent;
+        color: #6f6f6f;
+        font-size: 13px;
+        line-height: 1;
+        cursor: pointer;
+        opacity: 0;
+        transition: background .15s ease, color .15s ease, opacity .15s ease;
+    }
+
+    .tab:hover .tab-close,
+    .tab.active .tab-close { opacity: 1; }
+
+    .tab-close:hover {
+        background: #2a2a2a;
+        color: #ffffff;
+    }
+
+    #newTab {
+        flex: 0 0 auto;
+        align-self: center;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        background: transparent;
+        color: #9a9a9a;
+        font-size: 16px;
+        line-height: 1;
+        cursor: pointer;
+        transition: background .15s ease, color .15s ease;
+    }
+
+    #newTab:hover {
+        background: #1a1a1a;
+        color: #ffffff;
+    }
+
+    /* ---------------- Editor ---------------- */
+    #container {
+        flex: 1 1 auto;
+        min-height: 0;
+        width: 100%;
+        background: #090909;
+    }
+</style>
+</head>
+<body>
+
+<div id="tabbar">
+    <div id="tabs"></div>
+    <button id="newTab" type="button" title="New tab">+</button>
+</div>
+
+<div id="container"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.44.0/min/vs/loader.min.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    /* ============================================================
+       State
+       ============================================================ */
+    var STORAGE_KEY = 'monaco-lua-editor-tabs-v1';
+
+    var tabs = [];            // [{ id, name, model, viewState }]
+    var activeId = null;      // id of the currently active tab
+    var saveTimer = null;
+
+    var tabsEl = document.getElementById('tabs');
+    var newTabBtn = document.getElementById('newTab');
+
+    /* ============================================================
+       Helpers
+       ============================================================ */
+    function makeId() {
+        return 'tab_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+    }
+
+    function getTab(id) {
+        for (var i = 0; i < tabs.length; i++) {
+            if (tabs[i].id === id) return tabs[i];
+        }
+        return null;
+    }
+
+    function nextTabName() {
+        var used = {};
+        for (var i = 0; i < tabs.length; i++) used[tabs[i].name] = true;
+        var n = 1;
+        while (used['Script ' + n]) n++;
+        return 'Script ' + n;
+    }
+
+    /* ============================================================
+       Tab creation
+       ============================================================ */
+    function createTab(opts) {
+        opts = opts || {};
+
+        var id = opts.id;
+        if (!id || typeof id !== 'string' || getTab(id)) id = makeId();
+
+        var code = typeof opts.code === 'string' ? opts.code : '';
+        var model = monaco.editor.createModel(code, 'lua');
+
+        var name = (opts.name && String(opts.name).trim()) ? String(opts.name).trim() : nextTabName();
+
+        var tab = {
+            id: id,
+            name: name,
+            model: model,
+            viewState: null
+        };
+
+        // Autosave whenever this tab's code changes
+        model.onDidChangeContent(function () {
+            scheduleSave();
+        });
+
+        tabs.push(tab);
+        return tab;
+    }
+
+    /* ============================================================
+       Rendering the tab bar
+       ============================================================ */
+    function renderTabs() {
+        tabsEl.innerHTML = '';
+
+        tabs.forEach(function (tab) {
+            var el = document.createElement('div');
+            el.className = 'tab' + (tab.id === activeId ? ' active' : '');
+            el.setAttribute('data-id', tab.id);
+
+            var nameEl = document.createElement('span');
+            nameEl.className = 'tab-name';
+            nameEl.textContent = tab.name;
+            nameEl.title = tab.name;
+
+            var closeEl = document.createElement('button');
+            closeEl.type = 'button';
+            closeEl.className = 'tab-close';
+            closeEl.innerHTML = '&times;';
+            closeEl.title = 'Close tab';
+
+            el.appendChild(nameEl);
+            el.appendChild(closeEl);
+
+            // Switch tab when clicking the tab body
+            el.addEventListener('click', function () {
+                if (tab.id !== activeId) switchTab(tab.id);
+            });
+
+            // Clicking the name: switch if inactive, rename if already active
+            nameEl.addEventListener('click', function (e) {
+                e.stopPropagation();
+                if (tab.id !== activeId) {
+                    switchTab(tab.id);
+                } else {
+                    startRename(el, tab);
+                }
+            });
+
+            // Close button
+            closeEl.addEventListener('click', function (e) {
+                e.stopPropagation();
+                e.preventDefault();
+                closeTab(tab.id);
+            });
+
+            tabsEl.appendChild(el);
+        });
+
+        // Keep the active tab visible
+        var activeEl = tabsEl.querySelector('.tab.active');
+        if (activeEl && activeEl.scrollIntoView) {
+            activeEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        }
+    }
+
+    /* ============================================================
+       Rename
+       ============================================================ */
+    function startRename(tabEl, tab) {
+        if (tabEl.querySelector('.tab-rename')) return;
+
+        var nameEl = tabEl.querySelector('.tab-name');
+        if (!nameEl) return;
+
+        var input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'tab-rename';
+        input.value = tab.name;
+        input.spellcheck = false;
+
+        nameEl.replaceWith(input);
+        input.focus();
+        input.select();
+
+        var finished = false;
+
+        function finish(commit) {
+            if (finished) return;
+            finished = true;
+
+            if (commit) {
+                var v = input.value.trim();
+                if (v) tab.name = v;
+            }
+
+            renderTabs();
+            scheduleSave();
+        }
+
+        input.addEventListener('click', function (e) { e.stopPropagation(); });
+        input.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+        input.addEventListener('dblclick', function (e) { e.stopPropagation(); });
+
+        input.addEventListener('keydown', function (e) {
+            e.stopPropagation();
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                finish(true);
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                finish(false);
+            }
+        });
+
+        // Clicking outside (blur) saves the name
+        input.addEventListener('blur', function () {
+            finish(true);
+        });
+    }
+
+    /* ============================================================
+       Switching / adding / closing tabs
+       ============================================================ */
+    function activateTab(tab) {
+        if (!tab) return;
+
+        var current = getTab(activeId);
+        if (window.editor && current && current !== tab) {
+            try {
+                current.viewState = window.editor.saveViewState();
+            } catch (e) { /* ignore */ }
+        }
+
+        activeId = tab.id;
+
+        if (window.editor) {
+            window.editor.setModel(tab.model);
+            if (tab.viewState) {
+                try { window.editor.restoreViewState(tab.viewState); } catch (e) { /* ignore */ }
+            }
+            window.editor.focus();
+        }
+
+        renderTabs();
+        scheduleSave();
+    }
+
+    function switchTab(id) {
+        var tab = getTab(id);
+        if (!tab || tab.id === activeId) return;
+        activateTab(tab);
+    }
+
+    function addTab() {
+        if (!window.editor) return;
+        var tab = createTab({});
+        activateTab(tab);
+    }
+
+    function closeTab(id) {
+        var idx = -1;
+        for (var i = 0; i < tabs.length; i++) {
+            if (tabs[i].id === id) { idx = i; break; }
+        }
+        if (idx === -1) return;
+
+        var closing = tabs[idx];
+        var wasActive = (activeId === id);
+
+        tabs.splice(idx, 1);
+
+        if (tabs.length === 0) {
+            // Never allow zero tabs: create a fresh one
+            var fresh = createTab({});
+            activeId = fresh.id;
+            if (window.editor) {
+                window.editor.setModel(fresh.model);
+                window.editor.focus();
+            }
+            closing.model.dispose();
+        } else if (wasActive) {
+            var next = tabs[Math.min(idx, tabs.length - 1)];
+            activeId = next.id;
+            if (window.editor) {
+                window.editor.setModel(next.model);
+                if (next.viewState) {
+                    try { window.editor.restoreViewState(next.viewState); } catch (e) { /* ignore */ }
+                }
+                window.editor.focus();
+            }
+            closing.model.dispose();
+        } else {
+            closing.model.dispose();
+        }
+
+        renderTabs();
+        scheduleSave();
+    }
+
+    /* ============================================================
+       Persistence
+       ============================================================ */
+    function saveNow() {
+        try {
+            var data = {
+                activeId: activeId,
+                tabs: tabs.map(function (t) {
+                    return {
+                        id: t.id,
+                        name: t.name,
+                        code: t.model.getValue()
+                    };
+                })
+            };
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        } catch (e) { /* storage unavailable — fail silently */ }
+    }
+
+    function scheduleSave() {
+        if (saveTimer) clearTimeout(saveTimer);
+        saveTimer = setTimeout(function () {
+            saveTimer = null;
+            saveNow();
+        }, 250);
+    }
+
+    function loadSaved() {
+        try {
+            var raw = localStorage.getItem(STORAGE_KEY);
+            if (!raw) return null;
+            var data = JSON.parse(raw);
+            if (!data || !Array.isArray(data.tabs) || data.tabs.length === 0) return null;
+            return data;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /* ============================================================
+       New-tab button
+       ============================================================ */
+    newTabBtn.addEventListener('click', function (e) {
+        e.preventDefault();
+        addTab();
+    });
+
+    /* ============================================================
+       Flush pending saves on exit
+       ============================================================ */
+    window.addEventListener('beforeunload', function () {
+        if (saveTimer) {
+            clearTimeout(saveTimer);
+            saveTimer = null;
+        }
+        saveNow();
+    });
+    window.addEventListener('pagehide', saveNow);
+    document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'hidden') saveNow();
+    });
+
+    /* ============================================================
+       Monaco bootstrap
+       ============================================================ */
+    require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.44.0/min/vs' } });
+
+    require(['vs/editor/editor.main'], function () {
+
+        /* ---------- Lua autocomplete (unchanged) ---------- */
+        monaco.languages.registerCompletionItemProvider('lua', {
+            provideCompletionItems: function (model, position) {
+                var suggestions = [
+                    { label: 'game', kind: monaco.languages.CompletionItemKind.Variable, insertText: 'game' },
+                    { label: 'workspace', kind: monaco.languages.CompletionItemKind.Variable, insertText: 'workspace' },
+                    { label: 'script', kind: monaco.languages.CompletionItemKind.Variable, insertText: 'script' },
+                    { label: 'wait', kind: monaco.languages.CompletionItemKind.Function, insertText: 'wait(${1:seconds})', insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet },
+                    { label: 'warn', kind: monaco.languages.CompletionItemKind.Function, insertText: 'warn(${1:message})', insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet },
+                    { label: 'print', kind: monaco.languages.CompletionItemKind.Function, insertText: 'print(${1:message})', insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet },
+                    { label: 'spawn', kind: monaco.languages.CompletionItemKind.Function, insertText: 'spawn(function()\n\t$0\nend)', insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet },
+                    { label: 'delay', kind: monaco.languages.CompletionItemKind.Function, insertText: 'delay(${1:seconds}, function()\n\t$0\nend)', insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet },
+                    { label: 'tick', kind: monaco.languages.CompletionItemKind.Function, insertText: 'tick()' },
+                    { label: 'Enum', kind: monaco.languages.CompletionItemKind.Class, insertText: 'Enum' },
+                    { label: 'Instance', kind: monaco.languages.CompletionItemKind.Class, insertText: 'Instance' },
+                    { label: 'Vector3', kind: monaco.languages.CompletionItemKind.Class, insertText: 'Vector3' },
+                    { label: 'CFrame', kind: monaco.languages.CompletionItemKind.Class, insertText: 'CFrame' },
+                    { label: 'Color3', kind: monaco.languages.CompletionItemKind.Class, insertText: 'Color3' },
+                    { label: 'UDim2', kind: monaco.languages.CompletionItemKind.Class, insertText: 'UDim2' },
+                    { label: 'task', kind: monaco.languages.CompletionItemKind.Module, insertText: 'task' },
+                    { label: 'task.wait', kind: monaco.languages.CompletionItemKind.Function, insertText: 'task.wait(${1:seconds})', insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet },
+                    { label: 'task.spawn', kind: monaco.languages.CompletionItemKind.Function, insertText: 'task.spawn(${1:function})', insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet },
+                    { label: 'task.defer', kind: monaco.languages.CompletionItemKind.Function, insertText: 'task.defer(${1:function})', insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet },
+                    { label: 'task.delay', kind: monaco.languages.CompletionItemKind.Function, insertText: 'task.delay(${1:seconds}, ${2:function})', insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet },
+                    { label: 'HttpGet', kind: monaco.languages.CompletionItemKind.Method, insertText: 'HttpGet("${1:url}")', insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet },
+                    { label: 'GetObjects', kind: monaco.languages.CompletionItemKind.Method, insertText: 'GetObjects("${1:assetId}")', insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet },
+                    { label: 'GetService', kind: monaco.languages.CompletionItemKind.Method, insertText: 'GetService("${1:ServiceName}")', insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet }
+                ];
+                return { suggestions: suggestions };
+            }
+        });
+
+        /* ---------- Theme: exact #090909 background ---------- */
+        monaco.editor.defineTheme('wave-dark', {
+            base: 'vs-dark',
+            inherit: true,
+            rules: [],
+            colors: {
+                'editor.background': '#090909'
+            }
+        });
+
+        /* ---------- Restore tabs from localStorage ---------- */
+        var saved = loadSaved();
+
+        if (saved) {
+            var seen = {};
+            saved.tabs.forEach(function (t) {
+                t = t || {};
+                var id = (typeof t.id === 'string' && t.id && !seen[t.id]) ? t.id : null;
+                if (id) seen[id] = true;
+
+                createTab({
+                    id: id,
+                    name: (typeof t.name === 'string' ? t.name : null),
+                    code: (typeof t.code === 'string' ? t.code : '')
+                });
+            });
+
+            var wanted = null;
+            for (var i = 0; i < tabs.length; i++) {
+                if (tabs[i].id === saved.activeId) { wanted = tabs[i]; break; }
+            }
+            activeId = (wanted || tabs[0]).id;
+        } else {
+            var first = createTab({ name: 'Script 1', code: '-- Change Me! \n' });
+            activeId = first.id;
+        }
+
+        /* ---------- Create the editor bound to the active model ---------- */
+        var activeTab = getTab(activeId) || tabs[0];
+
+        window.editor = monaco.editor.create(document.getElementById('container'), {
+            model: activeTab.model,
+            language: 'lua',
+            theme: 'wave-dark',
+            automaticLayout: true,
+            minimap: { enabled: false },
+            backgroundColor: '#090909',
+            tabCompletion: 'on',
+            suggestOnTriggerCharacters: true,
+            quickSuggestions: true,
+            acceptSuggestionOnEnter: 'on'
+        });
+
+        if (activeTab.viewState) {
+            try { window.editor.restoreViewState(activeTab.viewState); } catch (e) { /* ignore */ }
+        }
+
+        renderTabs();
+        window.editor.focus();
+
+        // Persist the restored state once so IDs/active tab are stored
+        saveNow();
+    });
+
+    /* ============================================================
+       Public API (unchanged signatures, act on the active tab)
+       ============================================================ */
+    window.getValue = function () {
+        return window.editor.getValue();
+    };
+
+    window.setValue = function (v) {
+        window.editor.setValue(v);
+    };
+
+    window.setMinimap = function (enabled) {
+        window.editor.updateOptions({
+            minimap: { enabled: enabled }
+        });
+    };
+
+    /* Kept for compatibility with any external code referencing the old globals */
+    function getValue() { return window.editor.getValue(); }
+    function setValue(v) { window.editor.setValue(v); }
+    function setMinimap(enabled) { window.editor.updateOptions({ minimap: { enabled: enabled } }); }
+})();
+</script>
+</body>
+</html>
